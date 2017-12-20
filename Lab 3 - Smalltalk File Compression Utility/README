@@ -1,0 +1,7 @@
+This program was done without pair programming. 
+
+This program will use Huffman coding to compress and decompress files.
+
+A file  is  either  compressed  (with  the -c option), uncompressed  (with  the -u option),  
+one  of  which is required, unless  the -t option  is  specified. The input filename is required.  
+If the output filename is not specified, output is written to the standard output.

@@ -1,0 +1,368 @@
+#!/afs/cats.ucsc.edu/courses/cmps112-wm/usr/racket/bin/mzscheme -qr
+
+; 1525861
+; DAVIE TRUONG
+; dtruong8@ucsc.edu
+
+;#lang racket
+;; $Id: sbi.scm,v 1.3 2016-09-23 18:23:20-07 - - $
+;;
+;; NAME
+;;    sbi.scm - silly basic interpreter
+;;
+;; SYNOPSIS
+;;    sbi.scm filename.sbir
+;;
+;; DESCRIPTION
+;;    The file mentioned in argv[1] is read and assumed to be an SBIR
+;;    program, which is the executed.  Currently it is only printed.
+;;
+
+;; Prints to the screen
+;; Name: *stderr* , Exp: current-error-port
+(define *stderr* (current-error-port))     ;; prints to the screen when the function is used
+
+;; Split the path of the running executable and assign the base path to the function "*run-file*"
+(define *run-file*
+    (let-values                            ;; The following expression outputs must match the number of variables
+        (((dirpath basepath root?)         ;; Variables representing the 3 paths that will come from the expression
+            (split-path (find-system-path 'run-file))))   ;; (Find-system-path 'run-file) returns the path of the
+                                                          ;; current executable
+                                                          ;; Split-path deconstructs the path just found and returns
+                                                          ;; two paths and a boolean
+        (path->string basepath))                          ;; Base path is turned into a string
+)
+
+;; Takes a list of strings and prints it to the screen using *stderr* function
+;; Name: die , Accepts: list 
+(define (die list)  
+    (for-each (lambda (item) (display item *stderr*)) list)  ;; Takes each element from the list and puts it in item variable
+                                                             ;; displays the item to standard error using the "*stderr*" function
+    (newline *stderr*)     ;; Print a new line in the standard error output
+    (exit 1)               ;; Exit the program with code 1
+)
+
+;; Prints the base path to the screen
+(define (usage-exit)
+    (die `("Usage: " ,*run-file* " filename"))
+)
+
+;; Takes a given file name, opens file and checks if it opens successfully 
+(define (readlist-from-inputfile filename)
+    (let ((inputfile (open-input-file filename)))      ;; Opens the file stream using the filename and storing it in inputfile
+         (if (not (input-port? inputfile))             ;; Check to see if file cannot be opened
+             (die `(,*run-file* ": " ,filename ": open failed"))     ;; IF it cant be openned,
+                                                                     ;; the file path, file name and string is a list that gets passed
+                                                                     ;; into the function "die" which outputs the list to the screen
+                                                                     ;; Else if it can be openned 
+             (let ((program (read inputfile)))                       ;; Read the inputfile and store it in program variable
+                  (close-input-port inputfile)                       ;; Close the file stream that was store in inputfile
+                         program))))                                 ;; program now contains a list of the file data 
+
+;; Prints out the line of the program
+;; Name: write-program-by-line , Accepts: filename and program(contents of the file)
+(define (write-program-by-line filename program)
+    (printf "==================================================~n")     ;; Format printing and newline
+    (printf "~a: ~s~n" *run-file* filename)                             ;; Format printing the base file path and file name
+    (printf "==================================================~n")
+    (printf "(~n")
+    (map (lambda (line) (printf "~s~n" line)) program)                  ;; take a line from the program and prints it
+    (printf ")~n"))
+
+;; Makes the hash table to hold all of the functions which include operators
+(define function-table (make-hash))
+
+;; Used to store the key and value function pair in the function table
+(define (function-put! key value)
+        (hash-set! function-table key value))
+;; Initialize the function-table
+(for-each
+     (lambda (pair)
+             (function-put! (car pair) (cadr pair)))
+     `(
+        (div     ,(lambda (x y) (floor (/ x y))))
+        (log10   ,(lambda (x) (/ (log x) (log 10.0))))
+        (mod     ,(lambda (x y) (- x (* (div x y) y))))
+        (quot    ,(lambda (x y) (truncate (/ x y))))
+        (rem     ,(lambda (x y) (- x (* (quot x y) y))))
+        (<>      ,(lambda (x y) (not (= x y))))
+        (/       ,(lambda (x y) (/ (+ x 0.0) (+ y 0.0))))
+        (log     ,(lambda (x) (log (+ x 0.0))))
+        (+,+)(-,-)(*,*)
+        (<=,<=)(>=,>=)(=,=)(>,>)(<,<)
+        (^       ,expt)
+        (abs     ,abs) 
+        (ceil    ,ceiling)
+        (exp     ,exp)
+        (floor   ,floor)
+        (sqrt    ,sqrt)
+        (tan ,tan)(sin ,sin)(cos ,cos)
+        (atan ,atan)(asin ,asin)(acos ,acos)
+        (round ,round) (pi ,pi) (e , (exp 1))
+))
+;; Makes the hash table to hold values of all variables and [label | Statement]
+(define variable-table (make-hash))
+
+;; Initialize the variable table
+(for-each
+     (lambda (pair)
+             (hash-set! variable-table (car pair) (cadr pair)))
+     '(
+        (log10_2 0.301029995663981195213738894724493026768189881)
+        (sqrt_2  1.414213562373095048801688724209698078569671875)
+        (e       2.718281828459045235360287471352662497757247093)
+        (pi      3.141592653589793238462643383279502884197169399)
+     ))
+
+;; Makes the hash table to store [line # | Statement/Everything else], [label | line #], [line # | label]
+(define label-table (make-hash))
+
+;; Keep track the number of lines in the file
+(define (lines-in-file list)
+  (if (null? list)
+      0
+      (+ 1 (lines-in-file(cdr list)))
+  )
+)
+
+;; Fill the label-table
+;; Name: initialize-label-table , Accepts: program (contains a list of lines)
+(define (initialize-label-table program)
+  (map (lambda (currentLine)            ;; For each line in the program do
+         (let ((index (car currentLine)))        ;; Keep track of the current line number in index
+           (let ((statement (cdr currentLine)))  ;; Store everything else following the line number in statement
+             (if (null? statement) statement    ;; Check if the statement is empty
+                 (let ((first-item-in-statement (car statement)))       ;; If the statement is empty store the first value 
+                   (hash-set! label-table index first-item-in-statement)    ;; Stores the line number and the statement
+                   (if (symbol? first-item-in-statement)      ;; Otherwise of the statement is not empty, check if it is a label
+                       (let ((label first-item-in-statement))   ;; If it is a label, store it in the label variable
+                         (hash-set! label-table label index)     ;; Stores the label as the key and line number as value
+                         (let ((second-item-in-statement (cdr statement)))    ;; Stores the second item in the phrase, which is the statement
+                           (if (null? second-item-in-statement)               ;; Check if the statement is empty
+                               (hash-set! variable-table label second-item-in-statement)    ;; Store the Label and the empty statement
+                               (hash-set! variable-table label (car second-item-in-statement))   ;; Store the Label and the statement
+                           )
+                         )
+                        )
+                     first-item-in-statement
+                    )
+                   )
+                 )
+             )
+           )
+         )
+     program
+   )
+;   (printf "==================~n")
+;   (printf "Printing Tables~n")
+  ;;variable-table: (LABEL Statement) and (Varaiable . Values)
+;   (printf "Printing variable-table~n")
+;   (map (lambda (item) (printf "~s~n" item))(hash->list variable-table))
+;   (newline)
+  ;; label-table: (Line # Statement) AND (LABEL . Line Number)
+;   (printf "Printing label-table~n")
+;   (map (lambda (item) (printf "~s~n" item))(hash->list label-table))
+;   (newline)
+)
+
+;; Determine and break up the line parameter to evaluate the statement
+;; Name: interpret-line , Accepts: line
+(define (interpret-line line)
+  (if (or (null? line)(number? line)(symbol? line))     ;; Checks to see if the line contains valid data
+      (if (symbol? line)      ;; Checks to see if the line is a symbol
+          (hash-ref function-table line) line)     ;; Evaluate the line using the function-table functions
+      (if (null? (cddr line))       ;; Check to see if the line has a left and right expression  
+            ((hash-ref function-table (car line)) (interpret-line (cadr line))) ;; If there is no right expression, then evaluate using one input   
+            ((hash-ref function-table (car line)) (interpret-line (cadr line)) (interpret-line (caddr line))) ;; Otherwise recursively call to evaluate 
+       )
+    )
+)
+
+(define (dim-insert-or-replace expression)
+  (let ((current-symbol (caar expression)) (size (round (interpret-line (cadar expression))))) ;; gets the variable name and rounded size
+    (if (< size 0)   ;; check to see the size of the array is less than 0
+        (die `(,*run-file* ": Dimension: " ,current-symbol " is not a valid array size"))    ;; If the array is an invalid size print error and exit
+        (let ((new-array (make-vector size)))   ;; Create the array using the given size
+          (hash-set! function-table current-symbol
+                     (lambda args  ;; Properly indexs the array
+                            (if (null? (cdr args))
+                                     (vector-ref new-array (-(car args)1))
+                                     (vector-set! new-array (- (car args)1) (cadr args))
+                             )
+                      )
+                     )   ;; add the new array to the function-table
+          )
+    )
+  )
+)
+
+;; Makes an assignment to a variable, its value is stored into the function table
+;; replacing whatever was there previously
+;; Name: let-variable-assignment , Accepts: expression
+(define (let-variable-assignment expression)
+  (let ((current-symbol (car expression)) (value (cadr expression)))    ;; Stores the variables and value
+    (if (pair? current-symbol)      ;; Checks to see if the variable is a pair
+        (let ((array (hash-ref function-table (car current-symbol)))    ;; If it is a pair, then get the data from the function table
+              (index (interpret-line (cadr current-symbol))))           ;; for both items in the pair
+              (array index (interpret-line value))                    ;; Interpret the statement and assign the new value to the variable pair
+         )
+        (hash-set! function-table current-symbol (interpret-line value)) ;; Otherwise, interpret the statement and insert 
+    )                                                                    ;; into the function table representing the symbol
+  )
+)  
+          
+;; Control transfers to the statement referred to by the Label
+;; needs to accept a line and return the line number the program can transfer to
+;; an error occurs if the Label is not defined
+;; Name: goto-transition , Accepts: label
+(define (goto-transition line)
+  (if (hash-has-key? label-table (cadr line))     ;; Checks to see if the label is in the table
+      (hash-ref label-table (cadr line))          ;; Returns the line number that we need to go to
+      (die `(,*run-file* ": Goto Label: " ,(cadr line) " is not defined"))   ;; Otherwise print an error message
+  )
+)
+
+;; Two expressions are compared according to the given Relop
+;; If the comparison is true, control transfers to the statement, as for the goto statement
+;; Name: if-compare , Accepts: line
+(define (if-compare line file-counter)
+  (let ((statement (car line))(label (cadr line)))   ;; Assigns the expression and label of the line
+    (if (interpret-line statement)                   ;; Check to see if the comparison is true
+        (hash-ref label-table label)                  ;; Returns the line number that the label is at
+        (+ file-counter 1)
+        ;(die `(,*run-file* ": If Label: " ,label " is not defined"))   ;; Otherwise print an error message
+    )
+ )
+)
+
+;; Each of the operands is printed in sequence, with a space before expression values
+;; A newline is outputed at the end of the print statement
+;; Name: print-operand , Accepts: line
+(define (print-operand line)
+    (if (null? line)
+     (printf "~n")        ;; Prints a newline when the line is empty, happens at the start or end of the function
+     (let ((to-be-printed (car line)) (left-over-line (cdr line)))  ;; Stores the first item in the line and the rest of the line
+       (if (string? to-be-printed)       ;; Check to see if the first item needs to be evaluated
+           (printf "~a" to-be-printed)    ;; If it doesnt, then print it out
+           (begin
+             (if (and(pair? to-be-printed)(vector? (hash-ref function-table (car to-be-printed)))(hash-has-key? function-table (cadr to-be-printed)))   ;; Checks to see if we need to print an array
+                 (printf "~a" (vector-ref  (hash-ref function-table (car to-be-printed)) (hash-ref function-table (cadr to-be-printed)))) ;; Gets the value given the array and index
+                 (printf  "~a" (interpret-line to-be-printed))    ;; Otherwise evaluate the item and then print it
+                 )
+           )
+        )
+       (print-operand left-over-line)   ;; Recursively call, until the line is empty
+      )
+     )
+)
+
+;; Getting the input value
+(define get-user-input (current-input-port))
+
+;; Numeric values are read in and assigned to the input variables in sequence
+;; Arguments might be elements of an array
+;; Each value read into a variable, the value is inserted into the function table under the variable's key
+;; Arrays must already exist and the subscript not be out of bounds
+;; Name: input-operand , Accepts: list-values
+(define (input-operand list-values)
+    (hash-set! function-table 'inputcount 0)  ;; Initialize the count for the items inputed in the function table
+    (map (lambda (item)                      ;; Goes through each item on the list-values 
+           (let ((user-input (read get-user-input)))     ;; Grab the user input data
+             (cond 
+               ((number? user-input)          ;; Check if it is a number so that it can be assigned
+                (hash-set! function-table item user-input)   ;; Assign to the function-table the item from the list and the user's value
+                (hash-set! function-table 'inputcount (+ (hash-ref function-table 'inputcount) 1))    ;; Update the count for the items inputed by 1 
+               )       
+               ((eof-object? user-input)               ;; Check if the end of the list had been reached
+                (hash-set! function-table 'inputcount -1)    ;; Update the count to -1 to signify end of file
+               )
+               (else
+                (die `(,*run-file* ": Input-Operand: " ,user-input " is not a valid value"))   ;; Otherwise print an error message
+               )
+              )
+           )
+         )
+         list-values
+     )
+)
+
+;; Interprets the statement accordng to the statement-type
+;; Name: statement-evaluation , Accepts: line
+(define (statement-evaluation line)
+  (let ((statement-type (car line)) (expression (cdr line)))
+                        (cond
+                          ((equal? statement-type 'dim)(dim-insert-or-replace expression))
+                          ((equal? statement-type 'let)(let-variable-assignment expression))
+                          ((equal? statement-type 'print)(print-operand expression))
+                          ((equal? statement-type 'input)(input-operand expression))
+                        )
+   )
+)
+
+;; Interprets the input file and evaluates the operators through function calls
+;; Name: interpret-file , Accepts: file-length, file-counter            
+(define (interpret-file file-length file-counter)
+  (when (and (not(eq? (void) file-counter)) (not(null? file-counter)) (<= file-counter file-length))
+      (begin
+        (when (hash-has-key? label-table file-counter)
+            (let ((line (hash-ref label-table file-counter)))
+              (if (symbol? line)
+                  (let* ((label line)(statement (hash-ref variable-table label)))
+                    (if (null? statement) 
+                        statement
+                        (statement-evaluation statement)
+                    )
+                   )
+                  (statement-evaluation line)
+              )
+            )
+         )
+        (cond
+          ((and
+            (hash-has-key? label-table file-counter)  ;; Checks to see if the line number has a value (value = line)
+            (pair? (hash-ref label-table file-counter)) ;; Checks to see if the line has a pair (ex. (goto zero) or (if (<= i 10) loop)))
+            (or (equal? 'goto (car (hash-ref label-table file-counter))))) ;; Checks to see if the first item in the line is a "goto"
+           (interpret-file file-length (goto-transition (hash-ref label-table file-counter)))
+          )
+          ((and
+            (hash-has-key? label-table file-counter)  ;; Checks to see if the line number has a value (value = line)
+            (or (pair? (hash-ref label-table file-counter))   ;; When the line is not connect with a label, Checks to see if the line has a pair (ex. (goto zero) or (if (<= i 10) loop)))
+                (pair? (hash-ref variable-table (hash-ref label-table file-counter))))  ;;  When the line IS connect with a label, use the label to get the line from the variable table and check if it is a pair
+            (if (not (pair? (hash-ref label-table file-counter)))   ;; Used to see if the line is connected to the label or not
+                (equal? 'if (car (hash-ref variable-table (hash-ref label-table file-counter)))) ;; Checks to see if the first item in the line is an "if", when the line IS connected with a label
+                (equal? 'if (car (hash-ref label-table file-counter)))   ;; Checks to see if the first item in the line is an "if", when the line is not connected with a label
+            )
+           )
+           (if (not (pair? (hash-ref label-table file-counter)))  ;; Used to see if the line is connected to the label or not
+               (interpret-file file-length (if-compare (cdr (hash-ref variable-table (hash-ref label-table file-counter))) file-counter)) ;; When the line IS connected with a label
+               (interpret-file file-length (if-compare (cdr (hash-ref label-table file-counter)) file-counter)) ;; When the line is not connected with a label
+           )
+          )
+          (else
+            (interpret-file file-length (+ file-counter 1))
+          )
+        )
+      )                    
+  )
+)
+  
+;; Does the calling for the program
+;;Name: main , Accepts: argList
+(define (main arglist)
+    (if (or (null? arglist) (not (null? (cdr arglist))))     ;; Checks if the list of cmd line arguments is null 
+        (usage-exit)                                         ;; if it is then print the file path to the screen and exit with code 1
+                                                             ;; Else if the list is not null 
+        (let* ((sbprogfile (car arglist))                         ;; Let* values are computed sequentually
+                                                                  ;; Assign the first value in the list to sbprogfile, should be filename
+               (program (readlist-from-inputfile sbprogfile)) (file-length (lines-in-file program)) (file-counter 1)    ;; File is then open and read, the contents of the file gets assigned to
+                                                                  ;; program
+               )
+          (initialize-label-table program)
+          (interpret-file file-length file-counter))))       ;; The file name and contents of the file gets passed as parameters to the
+                                                                  ;; function "write-program-by-line"
+     
+
+;; Runs the program by inputing a list into the "main" function
+(main (vector->list (current-command-line-arguments)))     ;; Places the elements read from the cmd line into a vector
+                                                            ;; Turn the vector of elements into a list
+                                                            ;; Input the list into the "main" function as a parameter
